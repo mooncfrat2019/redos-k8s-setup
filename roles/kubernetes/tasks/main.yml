@@ -14,7 +14,7 @@
 
     - name: Копирование и распаковка cni плагинов
       unarchive:
-        src: "files/binares/cni-plugins-linux-amd64-v1.3.0.tgz"
+        src: "files/binares/cni/cni-plugins-linux-amd64-v1.3.0.tgz"
         dest: /opt/cni/bin
         owner: root
         group: root
@@ -92,7 +92,7 @@
   block:
     - name: Копирование и распаковка crictl
       unarchive:
-        src: "files/binares/crictl-v{{ crictl_version }}-linux-amd64.tar.gz"
+        src: "files/binares/crictl/crictl-v{{ crictl_version }}-linux-amd64.tar.gz"
         dest: /usr/bin
         owner: root
         group: root
@@ -561,7 +561,7 @@
   block:
     - name: Распаковка плагина cilium
       unarchive:
-        src: "{{ playbook_dir }}/files/binares/cilium-linux-amd64.tar.gz"
+        src: "{{ playbook_dir }}/files/binares/cilium/cilium-linux-amd64.tar.gz"
         dest: "/usr/bin"
         remote_src: no
         owner: root
