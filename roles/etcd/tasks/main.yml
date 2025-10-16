@@ -7,6 +7,29 @@
     - "{{ ansible_distribution | lower }}.yml"
   ignore_errors: yes
 
+- name: Disable firewalld completely
+  hosts: all
+  become: yes
+  tasks:
+    - name: Stop firewalld service
+      ansible.builtin.systemd:
+        name: firewalld
+        state: stopped
+
+    - name: Disable firewalld from starting on boot
+      ansible.builtin.systemd:
+        name: firewalld
+        enabled: no
+
+    - name: Check firewalld status
+      ansible.builtin.command: firewall-cmd --state
+      register: firewall_status
+      ignore_errors: yes
+
+    - name: Display firewall status
+      ansible.builtin.debug:
+        var: firewall_status.stdout
+
 - name: Create etcd user and group
   user:
     name: etcd
@@ -238,6 +261,10 @@
     state: started
     enabled: yes
     daemon_reload: yes
+  register: etcd_start_result
+  retries: 5
+  delay: 10
+  until: etcd_start_result is succeeded
 
 - name: Restart etcd
   systemd:
