@@ -1,9 +1,4 @@
 ---
-- name: Обновление списка пакетов
-  shell: |
-    apt-get update
-  when: inventory_hostname == "registry-server"
-
 - name: Установка Docker
   shell: |
     dnf install -y \
