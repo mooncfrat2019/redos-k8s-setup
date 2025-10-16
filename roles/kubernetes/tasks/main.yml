@@ -37,7 +37,7 @@
       ignore_errors: yes
       when: inventory_hostname != "registry-server"
 
-    - name: Создание базового конфига containerd 1.7.17
+    - name: Создание базового конфига containerd
       copy:
         content: |
           version = 2
@@ -63,11 +63,11 @@
                     runtime_type = "io.containerd.runc.v2"
                     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
                       SystemdCgroup = true
-      dest: /etc/containerd/config.toml
-      owner: root
-      group: root
-      mode: '0644'
-      become: yes
+        dest: /etc/containerd/config.toml
+        owner: root
+        group: root
+        mode: '0644'
+        become: yes
       when: inventory_hostname != "registry-server"
 
     - name: Включение и запуск containerd
