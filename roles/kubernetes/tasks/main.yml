@@ -67,7 +67,7 @@
         owner: root
         group: root
         mode: '0644'
-        become: yes
+      become: yes
       when: inventory_hostname != "registry-server"
 
     - name: Включение и запуск containerd
