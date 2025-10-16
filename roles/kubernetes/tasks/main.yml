@@ -134,7 +134,7 @@
 
 - name: Копирование бинарников k8s
   copy:
-    src: "{{ playbook_dir }}/files/k8s/{{ item }}"
+    src: "{{ playbook_dir }}/files/binares/k8s/{{ item }}"
     dest: "/usr/bin"
     owner: root
     group: root
