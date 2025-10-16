@@ -14,7 +14,7 @@
 
     - name: Копирование и распаковка cni плагинов
       unarchive:
-        src: "{{ playbook_dir }}/files/binares/cni/cni-plugins-linux-amd64-v1.3.0.tgz"
+        src: "{{ playbook_dir }}/files/binares/cni/cni-plugins-linux-amd64-v1.8.0.tgz"
         dest: /opt/cni/bin
         owner: root
         group: root
