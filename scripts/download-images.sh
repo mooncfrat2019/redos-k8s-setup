@@ -29,6 +29,7 @@ K8S_IMAGES=(
     "registry.k8s.io/kube-scheduler:v${K8S_VERSION}"
     "registry.k8s.io/kube-proxy:v${K8S_VERSION}"
     "registry.k8s.io/pause:${PAUSE_VERSION}"
+    "registry.k8s.io/pause:3.9"
     "registry.k8s.io/etcd:${ETCD_VERSION}"
     "registry.k8s.io/coredns/coredns:v${COREDNS_VERSION}"
 )
