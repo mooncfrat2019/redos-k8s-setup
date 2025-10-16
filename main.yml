@@ -1,0 +1,50 @@
+---
+- name: Проверка обязательных переменных
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Проверка наличия обязательных переменных
+      assert:
+        that:
+          - super_user is defined
+          - host_1 is defined
+          - host_2 is defined
+          - host_3 is defined
+          - in_ip_1 is defined
+          - in_ip_2 is defined
+          - in_ip_3 is defined
+          - host_registry is defined
+        msg: "Обязательные переменные super_user, host_1, host_2, host_3, host_registry, in_ip_1, in_ip_2, in_ip_3 должны быть определены"
+      tags: always
+
+- name: Перенос и распаковка оффлайн бандла
+  hosts: all
+  become: yes
+  gather_facts: yes
+  roles:
+    - role: transfer
+      tags: transfer
+
+- name: Базовая настройка системы
+  hosts: all
+  become: yes
+  roles:
+    - role: common
+      tags: common
+
+- name: Настройка Docker Registry
+  hosts: registry
+  become: yes
+  roles:
+    - role: docker-registry
+      tags: docker-registry
+
+- name: Настройка основных компонентов
+  hosts: k8s_cluster
+  become: yes
+  roles:
+    - role: etcd
+      tags: etcd
+    - role: kubernetes
+      tags: kubernetes

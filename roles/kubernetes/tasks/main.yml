@@ -21,6 +21,7 @@
         mode: '0755'
         remote_src: no
       become: yes
+  when: inventory_hostname != "registry-server"
 
 - name: Установка и настройка containerd
   block:
@@ -36,7 +37,7 @@
       ignore_errors: yes
       when: inventory_hostname != "registry-server"
 
-    - name: Создание базового конфига containerd
+    - name: Создание базового конфига containerd 1.7.17
       copy:
         content: |
           version = 2
@@ -55,16 +56,19 @@
                   [plugins."io.containerd.grpc.v1.cri".registry.configs."{{ registry_url }}".tls]
                     insecure_skip_verify = true
               [plugins."io.containerd.grpc.v1.cri".containerd]
+                default_runtime_name = "runc"
                 snapshotter = "overlayfs"
-                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-                  runtime_type = "io.containerd.runc.v2"
-                  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-                    SystemdCgroup = true
-        dest: /etc/containerd/config.toml
-        owner: root
-        group: root
-        mode: '0644'
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+                  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                    runtime_type = "io.containerd.runc.v2"
+                    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                      SystemdCgroup = true
+      dest: /etc/containerd/config.toml
+      owner: root
+      group: root
+      mode: '0644'
       become: yes
+      when: inventory_hostname != "registry-server"
 
     - name: Включение и запуск containerd
       systemd:
@@ -73,6 +77,7 @@
         enabled: yes
         daemon_reload: yes
       become: yes
+      when: inventory_hostname != "registry-server"
 
     - name: Ожидание готовности containerd
       wait_for:
@@ -80,6 +85,7 @@
         state: present
         timeout: 30
       become: yes
+      when: inventory_hostname != "registry-server"
   when: need_k8s_prepare | default(true) | bool
 
 - name: Установка и настройка crictl
@@ -93,6 +99,7 @@
         mode: '0755'
         remote_src: no
       become: yes
+      when: inventory_hostname != "registry-server"
 
     - name: Настройка конфига crictl
       copy:
@@ -106,31 +113,37 @@
         group: root
         mode: '0644'
       become: yes
+      when: inventory_hostname != "registry-server"
 
     - name: Проверка работы crictl
       command: crictl --version
       register: crictl_result
       changed_when: false
+      when: inventory_hostname != "registry-server"
   when: need_k8s_prepare | default(true) | bool
 
-- name: Обновление apt cache
-  shell: apt-get update
+- name: Создание временной директории под бинарники k8s
+  file:
+    path: "/tmp/k8s-binaries"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
   become: yes
+  when: inventory_hostname != "registry-server"
 
-- name: Установка Kubernetes компонентов
-  shell: |
-    apt-get install -y \
-      kubernetes{{ kubernetes_version_short }}-client \
-      kubernetes{{ kubernetes_version_short }}-kubeadm \
-      kubernetes{{ kubernetes_version_short }}-kubelet \
-      kubernetes{{ kubernetes_version_short }}-master \
-      kubernetes{{ kubernetes_version_short }}-node \
-      kubernetes{{ kubernetes_version_short }}-common \
-      kubernetes{{ kubernetes_version_short }}-crio \
-      python3-module-kubernetes-client \
-      kube-vip
-  become: yes
-  when: need_k8s_prepare | default(true) | bool
+- name: Копирование бинарников k8s
+  copy:
+    src: "{{ playbook_dir }}/files/k8s/{{ item }}"
+    dest: "/usr/bin"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - kubeadm
+    - kubectl
+    - kubelet
+  when: inventory_hostname != "registry-server"
 
 - name: Очистка предыдущей установки Kubernetes
   block:
@@ -139,6 +152,8 @@
         name: kubelet
         state: stopped
       become: yes
+      ignore_errors: yes
+      when: inventory_hostname != "registry-server"
 
     - name: Очистка данных containerd
       shell: |
@@ -146,6 +161,7 @@
         crictl rmi -a || true
       become: yes
       ignore_errors: yes
+      when: inventory_hostname != "registry-server"
   when: need_k8s_prepare | default(true) | bool
 
 - name: Подготовка директорий на всех узлах
@@ -162,6 +178,7 @@
         - /etc/kubernetes/pki
         - /etc/kubernetes/pki/etcd
       become: yes
+      when: inventory_hostname != "registry-server"
   when: need_k8s_prepare | default(true) | bool
 
 - name: Создание конфигурации kubeadm для external etcd
@@ -171,6 +188,7 @@
     owner: "{{ k8s_user }}"
     group: "{{ k8s_group }}"
     mode: 0644
+  when: inventory_hostname != "registry-server"
 
 - name: Принудительная перегенерация всех сертификатов
   block:
@@ -383,7 +401,7 @@
             --config=/var/lib/kubelet/config.yaml \
             --kubeconfig=/etc/kubernetes/kubelet.conf \
             --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock \
-            --pod-infra-container-image={{ registry_url }}/pause:3.9 \
+            --pod-infra-container-image={{ registry_url }}/pause:3.10 \
             --fail-swap-on=false \
             --v=2
           Restart=always
