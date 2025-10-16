@@ -1,0 +1,31 @@
+---
+# Default variables for etcd role
+etcd_version: "3.6.5"
+etcd_archive: "etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+etcd_install_dir: "/usr/local/bin"
+etcd_data_dir: "/var/lib/etcd"
+etcd_wal_dir: "/var/lib/etcd/wal"
+
+# Certificate directories
+etcd_cert_dir: "/etc/etcd/ssl"
+etcd_k8s_cert_dir: "/etc/kubernetes/pki"
+
+# Cluster configuration
+etcd_cluster_name: "k8s-etcd-cluster"
+etcd_initial_cluster_state: "new"
+
+# Client configuration
+etcd_client_port: 2379
+etcd_peer_port: 2380
+
+# Security
+etcd_client_protocol: "https"
+etcd_peer_protocol: "https"
+
+# Certificate settings
+etcd_generate_certs: true
+etcd_ca_days: 3650
+etcd_cert_days: 365
+
+# Kubernetes etcd connection
+etcd_servers: "{% for host in groups['masters'] %}{{ etcd_client_protocol }}://{{ hostvars[host]['node_ip'] }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}{% endfor %}"

@@ -1,0 +1,114 @@
+---
+- name: Проверка существования пользователя
+  user:
+    name: "{{ k8s_user }}"
+    state: present
+    groups: wheel
+    append: yes
+    shell: /bin/bash
+
+- name: Установка hostname
+  hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Добавление записей в /etc/hosts
+  template:
+    src: hosts.j2
+    dest: /etc/hosts
+    backup: yes
+  when: inventory_hostname == "master-node-1"
+
+- name: Отключение swap
+  shell: |
+    swapoff -a
+    sed -i '/swap/d' /etc/fstab
+
+- name: Настройка timezone
+  timezone:
+    name: "{{ timezone }}"
+
+- name: Установка базовых пакетов из интернета
+  block:
+    - name: Установка обязательных пакетов
+      dnf:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - curl
+        - wget
+        - gnupg2
+        - ca-certificates
+        - bridge-utils
+        - ntp
+        - ntpdate
+        - which
+        - nano
+      ignore_errors: yes
+      register: package_install
+      failed_when: false
+
+    - name: Показать результат установки
+      debug:
+        msg: "Пакет {{ item.item }}: {{ 'УСПЕХ' if not item.failed else 'ОШИБКА' }}"
+      loop: "{{ package_install.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Настройка параметров ядра
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_set: yes
+    ignoreerrors: yes
+  loop:
+    - { name: net.bridge.bridge-nf-call-ip6tables, value: 1 }
+    - { name: net.bridge.bridge-nf-call-iptables, value: 1 }
+    - { name: net.ipv4.ip_forward, value: 1 }
+    - { name: fs.inotify.max_user_watches, value: 524288 }
+    - { name: fs.inotify.max_user_instances, value: 512 }
+  ignore_errors: yes
+  failed_when: false
+
+- name: Создание базовых директорий
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: 0755
+    owner: "{{ k8s_user }}"
+    group: "{{ k8s_group }}"
+  loop:
+    - "{{ k8s_home }}/.kube"
+    - "{{ k8s_home }}/.local"
+    - /etc/kubernetes
+    - /etc/kuberntes/pki
+    - /etc/kubernetes/manifests
+    - /var/lib/kubelet
+    - /var/lib/etcd
+    - /opt/cni/bin
+    - "{{ offline_files_path }}"
+    - "{{ packages_path }}"
+    - "{{ images_path }}"
+
+- name: Настройка прав для пользователя на системные директории
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: 0755
+    owner: root
+    group: root
+  loop:
+    - /etc/kubernetes
+    - /var/lib/kubelet
+    - /var/lib/etcd
+
+- name: Перезагрузка системы (требуется для применения параметров ядра)
+  reboot:
+    msg: "Reboot triggered by Ansible for kernel parameters"
+    connect_timeout: 5
+    reboot_timeout: 300
+    pre_reboot_delay: 0
+    post_reboot_delay: 30
+    test_command: uptime
+  when: need_restart | default(false) | bool

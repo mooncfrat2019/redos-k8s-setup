@@ -1,0 +1,163 @@
+---
+- name: Check if transfer should be skipped
+  debug:
+    msg: "Skipping bundle transfer as skip_bundle_transfer is set to true"
+  when: skip_bundle_transfer | default(false) | bool
+
+- name: Check if bundle file exists locally (only when transfer is not skipped)
+  stat:
+    path: "{{ playbook_dir }}/files/k8s-offline-bundle.tar.gz"
+  register: bundle_file
+  delegate_to: localhost
+  run_once: true
+  when: not (skip_bundle_transfer | default(false) | bool)
+
+- name: Fail if bundle file not found and transfer not skipped
+  fail:
+    msg: |
+      Bundle file not found: {{ playbook_dir }}/files/k8s-offline-bundle.tar.gz
+      
+      To create the bundle:
+      1. Run on machine with internet: ./scripts/prepare-offline-content.sh
+      2. Copy the generated k8s-offline-bundle-*.tar.gz to files/k8s-offline-bundle.tar.gz
+      3. Or specify custom path with 'bundle_path' variable
+      
+      If bundle is already on target servers, use: -e "skip_bundle_transfer=true"
+  when:
+    - not (skip_bundle_transfer | default(false) | bool)
+    - not bundle_file.stat.exists
+
+- name: Create transfer directory on remote hosts
+  file:
+    path: "/tmp/k8s-transfer"
+    state: directory
+    mode: 0755
+
+- name: Get bundle file info (only when transfer is not skipped)
+  stat:
+    path: "{{ playbook_dir }}/files/k8s-offline-bundle.tar.gz"
+  register: bundle_info
+  delegate_to: localhost
+  run_once: true
+  when: not (skip_bundle_transfer | default(false) | bool)
+
+- name: Display bundle information (only when transfer is not skipped)
+  debug:
+    msg: |
+      Transferring bundle: {{ bundle_info.stat.path }}
+      Size: {{ (bundle_info.stat.size / 1024 / 1024) | round(2) }} MB
+      Exists: {{ bundle_info.stat.exists }}
+  when: not (skip_bundle_transfer | default(false) | bool)
+
+- name: Transfer bundle to remote hosts (only when transfer is not skipped)
+  copy:
+    src: "{{ playbook_dir }}/files/k8s-offline-bundle.tar.gz"
+    dest: "/tmp/k8s-transfer/k8s-offline-bundle.tar.gz"
+    mode: 0644
+  when: not (skip_bundle_transfer | default(false) | bool)
+
+- name: Verify transferred bundle (only when transfer is not skipped)
+  stat:
+    path: "/tmp/k8s-transfer/k8s-offline-bundle.tar.gz"
+  register: transferred_bundle
+  when: not (skip_bundle_transfer | default(false) | bool)
+
+- name: Show transfer verification (only when transfer is not skipped)
+  debug:
+    msg: "Bundle transferred successfully. Size: {{ (transferred_bundle.stat.size / 1024 / 1024) | round(2) }} MB"
+  when:
+    - not (skip_bundle_transfer | default(false) | bool)
+    - transferred_bundle.stat.exists
+
+- name: Check if bundle already exists on remote (when skipping transfer)
+  stat:
+    path: "/tmp/k8s-transfer/k8s-offline-bundle.tar.gz"
+  register: existing_bundle
+  when: skip_bundle_transfer | default(false) | bool
+
+- name: Warn if no bundle found when skipping transfer
+  debug:
+    msg: "⚠️  skip_bundle_transfer is true but no bundle found at /tmp/k8s-transfer/k8s-offline-bundle.tar.gz. Extraction may fail."
+  when:
+    - skip_bundle_transfer | default(false) | bool
+    - not existing_bundle.stat.exists
+
+- name: Create extraction script
+  template:
+    src: extract-bundle.sh.j2
+    dest: "/tmp/k8s-transfer/extract-bundle.sh"
+    mode: 0755
+
+- name: Extract bundle on remote hosts
+  command: |
+    /tmp/k8s-transfer/extract-bundle.sh
+  args:
+    chdir: "/tmp/k8s-transfer"
+  ignore_errors: yes  # Игнорируем ошибки извлечения
+
+- name: Check if extraction was successful
+  stat:
+    path: "{{ k8s_home }}/k8s-offline"
+  register: extraction_result
+  ignore_errors: yes
+
+- name: Fail if extraction failed completely
+  fail:
+    msg: |
+      Bundle extraction failed!
+      
+      Possible reasons:
+      1. Bundle file not found at /tmp/k8s-transfer/k8s-offline-bundle.tar.gz
+      2. Corrupted bundle file
+      3. Insufficient disk space
+      
+      If bundle was manually copied, ensure it's at /tmp/k8s-transfer/k8s-offline-bundle.tar.gz
+      Or run without skip_bundle_transfer to transfer automatically.
+  when: not extraction_result.stat.exists
+
+- name: Verify extracted content
+  stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ k8s_home }}/k8s-offline/files/packages"
+    - "{{ k8s_home }}/k8s-offline/files/images"
+    - "{{ k8s_home }}/k8s-offline/scripts"
+    - "{{ k8s_home }}/k8s-offline/roles"
+  register: extracted_dirs
+  when: extraction_result.stat.exists
+
+- name: Show extraction results
+  debug:
+    msg: |
+      Extraction completed!
+      Packages directory: {{ extracted_dirs.results[0].stat.exists | default('unknown') }}
+      Images directory: {{ extracted_dirs.results[1].stat.exists | default('unknown') }}
+      Scripts directory: {{ extracted_dirs.results[2].stat.exists | default('unknown') }}
+      Roles directory: {{ extracted_dirs.results[3].stat.exists | default('unknown') }}
+  when: extraction_result.stat.exists
+
+- name: Check package count
+  shell: |
+    find {{ k8s_home }}/k8s-offline/files/packages -name "*.deb" 2>/dev/null | wc -l || echo 0
+  register: package_count
+  when: extraction_result.stat.exists
+
+- name: Check image count
+  shell: |
+    find {{ k8s_home }}/k8s-offline/files/images -name "*.tar" 2>/dev/null | wc -l || echo 0
+  register: image_count
+  when: extraction_result.stat.exists
+
+- name: Show final counts
+  debug:
+    msg: |
+      Final counts:
+      Packages: {{ package_count.stdout | default('0') }}
+      Images: {{ image_count.stdout | default('0') }}
+  when: extraction_result.stat.exists
+
+- name: Cleanup transfer directory (optional)
+  file:
+    path: "/tmp/k8s-transfer"
+    state: absent
+  when: cleanup_transfer | default(true) | bool

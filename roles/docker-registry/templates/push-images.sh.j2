@@ -1,0 +1,60 @@
+#!/bin/bash
+set -e
+
+echo "=== Loading and pushing Docker images to local registry ==="
+
+REGISTRY="{{ registry_url }}"
+IMAGES_DIR="{{ k8s_home }}/k8s-offline/files/images"
+
+echo "Registry: $REGISTRY"
+echo "Images dir: $IMAGES_DIR"
+
+# Check if images directory exists
+if [ ! -d "$IMAGES_DIR" ]; then
+    echo "❌ Error: Images directory not found: $IMAGES_DIR"
+    exit 1
+fi
+
+echo "=== Step 1: Loading all images ==="
+for tar_file in "$IMAGES_DIR"/*.tar; do
+    if [ -f "$tar_file" ]; then
+        echo "Loading: $tar_file"
+        docker load -i "$tar_file"
+    fi
+done
+
+echo "=== Step 2: Listing all loaded images ==="
+docker images
+
+echo "=== Step 3: Tagging and pushing images ==="
+# Use a simple approach to get image names and tags
+docker images --format "{{ '{{.Repository}}' }}:{{ '{{.Tag}}' }}" | grep -v "<none>" | while read image; do
+    if [ -n "$image" ] && [ "$image" != "<none>:<none>" ]; then
+        echo "Processing: $image"
+
+        # Extract repository and tag
+        repository="${image%:*}"
+        tag="${image#*:}"
+
+        # Create new tag for registry
+        if [[ "$repository" == *"/"* ]]; then
+            new_name="${repository##*/}"
+        else
+            new_name="$repository"
+        fi
+
+        new_tag="$REGISTRY/$new_name:$tag"
+        echo "Tagging: $image -> $new_tag"
+        docker tag "$image" "$new_tag"
+
+        echo "Pushing: $new_tag"
+        if docker push "$new_tag"; then
+            echo "✅ Success: $new_tag"
+        else
+            echo "❌ Failed to push: $new_tag"
+        fi
+    fi
+done
+
+echo "=== Step 4: Final check ==="
+curl -s "http://$REGISTRY/v2/_catalog"

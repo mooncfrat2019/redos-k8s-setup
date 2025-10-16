@@ -1,0 +1,68 @@
+#!/bin/bash
+set -e
+
+echo "=== Extracting Kubernetes Offline Bundle ==="
+
+BUNDLE_FILE="/tmp/k8s-transfer/k8s-offline-bundle.tar.gz"
+EXTRACT_DIR="{{ k8s_home }}/k8s-offline"
+
+# Check if bundle exists
+if [ ! -f "$BUNDLE_FILE" ]; then
+    echo "❌ Error: Bundle file not found: $BUNDLE_FILE"
+    echo "💡 If using skip_bundle_transfer, ensure the bundle was manually copied to this path"
+    echo "💡 Or run without skip_bundle_transfer to transfer automatically"
+    exit 1
+fi
+
+# Check bundle integrity
+echo "🔍 Checking bundle integrity..."
+if ! tar -tzf "$BUNDLE_FILE" > /dev/null 2>&1; then
+    echo "❌ Error: Bundle file is corrupted or invalid"
+    exit 1
+fi
+
+# Create extraction directory in home
+echo "📁 Creating extraction directory: $EXTRACT_DIR"
+mkdir -p "$EXTRACT_DIR"
+
+# Extract bundle
+echo "📦 Extracting bundle..."
+if ! tar -xzf "$BUNDLE_FILE" -C "$EXTRACT_DIR" --strip-components=1; then
+    echo "❌ Error: Failed to extract bundle"
+    exit 1
+fi
+
+# Fix permissions
+echo "🔧 Setting permissions..."
+chmod -R 755 "$EXTRACT_DIR"
+find "$EXTRACT_DIR" -type f -name "*.sh" -exec chmod +x {} \;
+
+# Verify extracted content
+echo "🔍 Verifying extracted content..."
+
+check_directory() {
+    local dir=$1
+    local desc=$2
+    if [ -d "$dir" ] && [ "$(ls -A "$dir" 2>/dev/null)" ]; then
+        local file_count=$(find "$dir" -type f 2>/dev/null | wc -l || echo 0)
+        echo "✅ $desc: $file_count files"
+        return 0
+    else
+        echo "❌ $desc: MISSING OR EMPTY"
+        return 1
+    fi
+}
+
+check_directory "$EXTRACT_DIR/files/packages" "Packages"
+check_directory "$EXTRACT_DIR/files/images" "Docker images"
+check_directory "$EXTRACT_DIR/scripts" "Scripts"
+check_directory "$EXTRACT_DIR/roles" "Ansible roles"
+
+echo ""
+echo "🎉 Extraction completed successfully!"
+echo "📁 Project location: $EXTRACT_DIR"
+echo ""
+echo "Next steps:"
+echo "1. cd $EXTRACT_DIR"
+echo "2. Update inventory/hosts.yml with your server IPs"
+echo "3. Run: ansible-playbook -i inventory/hosts.yml site.yml"

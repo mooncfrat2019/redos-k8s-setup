@@ -1,0 +1,10 @@
+127.0.0.1 localhost
+{{ master_ips['master-node-1'] }} master-node-1
+{{ master_ips['master-node-2'] }} master-node-2
+{{ master_ips['master-node-3'] }} master-node-3
+{{ cluster_vip }} {{ cluster_domain }}
+
+# The following lines are desirable for IPv6 capable hosts
+::1 localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters

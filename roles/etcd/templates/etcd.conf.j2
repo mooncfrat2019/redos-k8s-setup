@@ -1,0 +1,33 @@
+# Node
+ETCD_NAME="{{ etcd_name }}"
+ETCD_DATA_DIR="{{ etcd_data_dir }}"
+ETCD_WAL_DIR="{{ etcd_wal_dir }}"
+
+# Listening
+ETCD_LISTEN_PEER_URLS="{{ etcd_listen_peer_urls }}"
+ETCD_LISTEN_CLIENT_URLS="{{ etcd_listen_client_urls }}"
+
+# Initial cluster configuration
+ETCD_INITIAL_CLUSTER="{{ etcd_initial_cluster }}"
+ETCD_INITIAL_CLUSTER_TOKEN="{{ etcd_cluster_name }}"
+ETCD_INITIAL_CLUSTER_STATE="{{ etcd_initial_cluster_state }}"
+ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_initial_advertise_peer_urls }}"
+ETCD_ADVERTISE_CLIENT_URLS="{{ etcd_advertise_client_urls }}"
+
+# Security
+{% if etcd_client_protocol == "https" %}
+ETCD_CLIENT_CERT_AUTH="true"
+ETCD_CERT_FILE="{{ etcd_cert_dir }}/{{ inventory_hostname }}.pem"
+ETCD_KEY_FILE="{{ etcd_cert_dir }}/{{ inventory_hostname }}-key.pem"
+ETCD_TRUSTED_CA_FILE="{{ etcd_cert_dir }}/ca.pem"
+ETCD_PEER_CLIENT_CERT_AUTH="true"
+ETCD_PEER_CERT_FILE="{{ etcd_cert_dir }}/{{ inventory_hostname }}.pem"
+ETCD_PEER_KEY_FILE="{{ etcd_cert_dir }}/{{ inventory_hostname }}-key.pem"
+ETCD_PEER_TRUSTED_CA_FILE="{{ etcd_cert_dir }}/ca.pem"
+{% else %}
+ETCD_CLIENT_CERT_AUTH="false"
+ETCD_PEER_CLIENT_CERT_AUTH="false"
+{% endif %}
+
+# Logging
+ETCD_DEBUG="false"

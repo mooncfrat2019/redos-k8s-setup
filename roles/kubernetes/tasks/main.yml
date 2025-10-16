@@ -1,0 +1,603 @@
+---
+- name: Установка и настройка cni плагинов
+  block:
+    - name: Создание необходимых директорий под плагины
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /opt/cni/bin
+      become: yes
+
+    - name: Копирование и распаковка cni плагинов
+      unarchive:
+        src: "files/binares/cni-plugins-linux-amd64-v1.3.0.tgz"
+        dest: /opt/cni/bin
+        owner: root
+        group: root
+        mode: '0755'
+        remote_src: no
+      become: yes
+
+- name: Установка и настройка containerd
+  block:
+    - name: Обновление пакетов
+      shell: |
+        dnf update -y
+      when: inventory_hostname != "registry-server"
+
+    - name: Установка containerd
+      shell: |
+        dnf install -y \
+          containerd
+      ignore_errors: yes
+      when: inventory_hostname != "registry-server"
+
+    - name: Создание базового конфига containerd
+      copy:
+        content: |
+          version = 2
+          root = "/var/lib/containerd"
+          state = "/run/containerd"
+          [grpc]
+            address = "/run/containerd/containerd.sock"
+          [plugins]
+            [plugins."io.containerd.grpc.v1.cri"]
+              sandbox_image = "{{ registry_url }}/pause:3.9"
+              [plugins."io.containerd.grpc.v1.cri".registry]
+                [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+                  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."{{ registry_url }}"]
+                    endpoint = ["http://{{ registry_url }}"]
+                [plugins."io.containerd.grpc.v1.cri".registry.configs]
+                  [plugins."io.containerd.grpc.v1.cri".registry.configs."{{ registry_url }}".tls]
+                    insecure_skip_verify = true
+              [plugins."io.containerd.grpc.v1.cri".containerd]
+                snapshotter = "overlayfs"
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                  runtime_type = "io.containerd.runc.v2"
+                  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                    SystemdCgroup = true
+        dest: /etc/containerd/config.toml
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+
+    - name: Включение и запуск containerd
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      become: yes
+
+    - name: Ожидание готовности containerd
+      wait_for:
+        path: /var/run/containerd/containerd.sock
+        state: present
+        timeout: 30
+      become: yes
+  when: need_k8s_prepare | default(true) | bool
+
+- name: Установка и настройка crictl
+  block:
+    - name: Копирование и распаковка crictl
+      unarchive:
+        src: "files/binares/crictl-v{{ crictl_version }}-linux-amd64.tar.gz"
+        dest: /usr/bin
+        owner: root
+        group: root
+        mode: '0755'
+        remote_src: no
+      become: yes
+
+    - name: Настройка конфига crictl
+      copy:
+        content: |
+          runtime-endpoint: unix:///var/run/containerd/containerd.sock
+          image-endpoint: unix:///var/run/containerd/containerd.sock
+          timeout: 10
+          debug: false
+        dest: /etc/crictl.yaml
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+
+    - name: Проверка работы crictl
+      command: crictl --version
+      register: crictl_result
+      changed_when: false
+  when: need_k8s_prepare | default(true) | bool
+
+- name: Обновление apt cache
+  shell: apt-get update
+  become: yes
+
+- name: Установка Kubernetes компонентов
+  shell: |
+    apt-get install -y \
+      kubernetes{{ kubernetes_version_short }}-client \
+      kubernetes{{ kubernetes_version_short }}-kubeadm \
+      kubernetes{{ kubernetes_version_short }}-kubelet \
+      kubernetes{{ kubernetes_version_short }}-master \
+      kubernetes{{ kubernetes_version_short }}-node \
+      kubernetes{{ kubernetes_version_short }}-common \
+      kubernetes{{ kubernetes_version_short }}-crio \
+      python3-module-kubernetes-client \
+      kube-vip
+  become: yes
+  when: need_k8s_prepare | default(true) | bool
+
+- name: Очистка предыдущей установки Kubernetes
+  block:
+    - name: Остановка kubelet
+      systemd:
+        name: kubelet
+        state: stopped
+      become: yes
+
+    - name: Очистка данных containerd
+      shell: |
+        crictl rm -fa || true
+        crictl rmi -a || true
+      become: yes
+      ignore_errors: yes
+  when: need_k8s_prepare | default(true) | bool
+
+- name: Подготовка директорий на всех узлах
+  block:
+    - name: Создание необходимых директорий
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/kubernetes
+        - /etc/kubernetes/pki
+        - /etc/kubernetes/pki/etcd
+      become: yes
+  when: need_k8s_prepare | default(true) | bool
+
+- name: Создание конфигурации kubeadm для external etcd
+  template:
+    src: kubeadm-config-external-etcd.yaml.j2
+    dest: /home/{{ k8s_user }}/kubeadm-config.yaml
+    owner: "{{ k8s_user }}"
+    group: "{{ k8s_group }}"
+    mode: 0644
+
+- name: Принудительная перегенерация всех сертификатов
+  block:
+    - name: Проверка текущих SAN в сертификате (если существует)
+      shell: |
+        if [ -f /etc/kubernetes/pki/apiserver.crt ]; then
+          openssl x509 -in /etc/kubernetes/pki/apiserver.crt -text -noout | grep -A20 "X509v3 Subject Alternative Name"
+        else
+          echo "Certificate does not exist yet"
+        fi
+      register: current_san_check
+      when: inventory_hostname == "master-node-1"
+
+    - name: Отображение текущих SAN
+      debug:
+        var: current_san_check.stdout
+      when: inventory_hostname == "master-node-1"
+
+    - name: Удаление ВСЕХ существующих сертификатов
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes/pki/apiserver.crt
+        - /etc/kubernetes/pki/apiserver.key
+        - /etc/kubernetes/pki/apiserver-kubelet-client.crt
+        - /etc/kubernetes/pki/apiserver-kubelet-client.key
+        - /etc/kubernetes/pki/front-proxy-client.crt
+        - /etc/kubernetes/pki/front-proxy-client.key
+        - /etc/kubernetes/pki/ca.crt
+        - /etc/kubernetes/pki/ca.key
+        - /etc/kubernetes/pki/sa.key
+        - /etc/kubernetes/pki/sa.pub
+        - /etc/kubernetes/pki/front-proxy-ca.crt
+        - /etc/kubernetes/pki/front-proxy-ca.key
+      become: yes
+      ignore_errors: yes
+      when: inventory_hostname == "master-node-1"
+
+    - name: Создание чистых директорий после удаления
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/kubernetes/pki
+        - /etc/kubernetes/pki/etcd
+      become: yes
+      when: inventory_hostname == "master-node-1"
+
+    - name: Генерация всех Kubernetes сертификатов заново
+      command: kubeadm init phase certs all --config /home/{{ k8s_user }}/kubeadm-config.yaml
+      when: inventory_hostname == "master-node-1"
+
+    - name: Проверка новых SAN в сертификате
+      shell: |
+        openssl x509 -in /etc/kubernetes/pki/apiserver.crt -text -noout | grep -A20 "X509v3 Subject Alternative Name"
+      register: new_san_check
+      when: inventory_hostname == "master-node-1"
+
+    - name: Отображение новых SAN
+      debug:
+        var: new_san_check.stdout
+      when: inventory_hostname == "master-node-1"
+
+    - name: Проверка наличия kubernetes.default.svc.k8s-ha.local в SAN
+      shell: |
+        openssl x509 -in /etc/kubernetes/pki/apiserver.crt -text -noout | grep "kubernetes.default.svc.k8s-ha.local"
+      register: k8s_domain_check
+      when: inventory_hostname == "master-node-1"
+
+    - name: Отображение проверки домена
+      debug:
+        var: k8s_domain_check.stdout
+      when: inventory_hostname == "master-node-1"
+  when: inventory_hostname == "master-node-1"
+
+- name: Копирование сертификатов через архив
+  block:
+    - name: Создание tar архива с сертификатами на master-node-1
+      shell: |
+        tar -czf /tmp/k8s_certs.tar.gz -C /etc/kubernetes/pki .
+      delegate_to: master-node-1
+      become: yes
+      run_once: true
+
+    - name: Скачивание архива с сертификатами
+      fetch:
+        src: /tmp/k8s_certs.tar.gz
+        dest: "{{ playbook_dir }}/k8s_certs.tar.gz"
+        flat: yes
+      become: yes
+      run_once: true
+      when: inventory_hostname == "master-node-1"
+
+    - name: Очистка архива на master-node-1
+      file:
+        path: /tmp/k8s_certs.tar.gz
+        state: absent
+      delegate_to: master-node-1
+      become: yes
+      run_once: true
+
+    - name: Распаковка архива на другие мастера
+      unarchive:
+        src: "{{ playbook_dir }}/k8s_certs.tar.gz"
+        dest: /etc/kubernetes/pki
+        owner: root
+        group: root
+      become: yes
+      when: inventory_hostname != "master-node-1"
+
+    - name: Установка правильных прав на ключевые файлы
+      file:
+        path: "/etc/kubernetes/pki/{{ item }}"
+        mode: '0600'
+        owner: root
+        group: root
+      loop:
+        - ca.key
+        - sa.key
+        - front-proxy-ca.key
+        - front-proxy-client.key
+        - apiserver.key
+        - apiserver-kubelet-client.key
+        - apiserver-etcd-client.key
+      become: yes
+      when: inventory_hostname != "master-node-1"
+
+    - name: Проверка скопированных сертификатов
+      shell: |
+        echo "=== Сертификаты в /etc/kubernetes/pki/ ==="
+        ls -la /etc/kubernetes/pki/
+        echo "=== Сертификаты etcd ==="
+        ls -la /etc/kubernetes/pki/etcd/ || echo "No etcd certs"
+      register: certs_check
+      become: yes
+      when: inventory_hostname != "master-node-1"
+
+    - name: Отображение проверки сертификатов
+      debug:
+        var: certs_check.stdout
+      when: inventory_hostname != "master-node-1"
+
+    - name: Очистка архива на хосте Ansible
+      file:
+        path: "{{ playbook_dir }}/k8s_certs.tar.gz"
+        state: absent
+      delegate_to: localhost
+      run_once: true
+
+- name: Инициализация первого control-plane узла
+  block:
+    - name: Загрузка необходимых образов
+      command: kubeadm config images pull --config /home/{{ k8s_user }}/kubeadm-config.yaml
+      when: inventory_hostname == "master-node-1"
+
+    - name: Полное удаление manifests директории со всем содержимым
+      file:
+        path: /etc/kubernetes/manifests/
+        state: absent
+      become: yes
+
+    - name: Пересоздание manifest директории
+      file:
+        path: /etc/kubernetes/manifests/
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      become: yes
+
+    - name: Удаление старых kubeconfig файлов
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes/kubelet.conf
+        - /etc/kubernetes/controller-manager.conf
+        - /etc/kubernetes/scheduler.conf
+        - /etc/kubernetes/admin.conf
+      become: yes
+      when: inventory_hostname == "master-node-1"
+
+    - name: Удаление kubeconfig из домашней директории пользователя
+      file:
+        path: "{{ k8s_home }}/.kube/config"
+        state: absent
+      when: inventory_hostname == "master-node-1"
+
+    - name: Иницализация конфига kubelet
+      command: kubeadm init phase kubeconfig kubelet --config /home/{{ k8s_user }}/kubeadm-config.yaml
+      when: inventory_hostname == "master-node-1"
+      become: yes
+
+    - name: Создание systemd сервиса для kubelet
+      copy:
+        content: |
+          [Unit]
+          Description=Kubernetes Kubelet
+          Documentation=https://kubernetes.io/docs/home/
+          Wants=network-online.target
+          After=network-online.target
+          After=containerd.service
+          
+          [Service]
+          ExecStart=/usr/bin/kubelet \
+            --config=/var/lib/kubelet/config.yaml \
+            --kubeconfig=/etc/kubernetes/kubelet.conf \
+            --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock \
+            --pod-infra-container-image={{ registry_url }}/pause:3.9 \
+            --fail-swap-on=false \
+            --v=2
+          Restart=always
+          StartLimitInterval=0
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /lib/systemd/system/kubelet.service
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+      when: inventory_hostname == "master-node-1"
+
+    - name: Перезагрузка демона systemd
+      systemd:
+        daemon_reload: yes
+      become: yes
+      when: inventory_hostname == "master-node-1"
+
+    - name: Stop kubelet service
+      become: yes
+      systemd:
+        name: kubelet
+        state: stopped
+
+    - name: Инициализация кластера с external etcd
+      command: |
+        kubeadm init --config /home/{{ k8s_user }}/kubeadm-config.yaml --upload-certs -v=5
+      register: kubeadm_init
+      when: inventory_hostname == "master-node-1"
+
+    - name: Отображение результата инициализации
+      debug:
+        var: kubeadm_init.stdout
+      when: inventory_hostname == "master-node-1"
+
+    - name: Извлечение join команд (исправленная версия)
+      block:
+        - name: Поиск строки с control-plane join командой в stdout
+          set_fact:
+            join_command_found: "{{ kubeadm_init.stdout | regex_search('kubeadm join.*--control-plane.*(--certificate-key|$)') }}"
+          when: inventory_hostname == "master-node-1"
+
+        - name: Если не нашли в stdout, ищем в stdout_lines
+          set_fact:
+            join_command_found: "{{ kubeadm_init.stdout_lines | join(' ') | regex_search('kubeadm join.*--control-plane.*(--certificate-key|$)') }}"
+          when:
+            - inventory_hostname == "master-node-1"
+            - not join_command_found
+
+        - name: Отображение найденной команды
+          debug:
+            var: join_command_found
+          when: inventory_hostname == "master-node-1"
+
+        - name: Извлечение certificate key
+          set_fact:
+            certificate_key: "{{ (kubeadm_init.stdout | regex_findall('(?<=certificate-key\\s)[a-f0-9]{64}'))[0] | default('') }}"
+          when: inventory_hostname == "master-node-1"
+
+        - name: Извлечение токена
+          set_fact:
+            join_token: "{{ (kubeadm_init.stdout | regex_findall('(?<=--token\\s)[a-z0-9]{6}\\.[a-z0-9]{16}'))[0] | default('') }}"
+          when: inventory_hostname == "master-node-1"
+
+        - name: Извлечение CA cert hash
+          set_fact:
+            ca_cert_hash: "{{ (kubeadm_init.stdout | regex_findall('(?<=--discovery-token-ca-cert-hash\\s)(sha256:[a-f0-9]{64})'))[0] | default('') }}"
+          when: inventory_hostname == "master-node-1"
+
+        - name: Проверка извлеченных значений
+          debug:
+            msg: |
+              Certificate Key: {{ certificate_key }} (length: {{ certificate_key | length }})
+              Join Token: {{ join_token }} (length: {{ join_token | length }})
+              CA Cert Hash: {{ ca_cert_hash }} (length: {{ ca_cert_hash | length }})
+          when: inventory_hostname == "master-node-1"
+
+        - name: Создание control plane join команды
+          set_fact:
+            control_plane_join_command: "kubeadm join {{ cluster_vip }}:6443 --apiserver-advertise-address {{ cluster_vip }} --token {{ join_token }} --discovery-token-ca-cert-hash {{ ca_cert_hash }} --control-plane --certificate-key {{ certificate_key }}"
+          when: inventory_hostname == "master-node-1"
+
+        - name: Отображение итоговой join команды
+          debug:
+            msg: |
+              === FINAL CONTROL PLANE JOIN COMMAND ===
+              {{ control_plane_join_command }}
+          when: inventory_hostname == "master-node-1"
+      when: inventory_hostname == "master-node-1"
+
+    - name: Настройка kubectl для пользователя
+      block:
+        - name: Создание .kube директории
+          file:
+            path: "{{ k8s_home }}/.kube"
+            state: directory
+            owner: "{{ k8s_user }}"
+            group: "{{ k8s_group }}"
+            mode: 0750
+
+        - name: Копирование конфигурации
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: "{{ k8s_home }}/.kube/config"
+            remote_src: yes
+            owner: "{{ k8s_user }}"
+            group: "{{ k8s_group }}"
+            mode: 0600
+      when: inventory_hostname == "master-node-1"
+
+- name: Ожидание готовности первого control-plane узла
+  block:
+    - name: Проверка здоровья Kubernetes API
+      shell: |
+        curl -k -s -o /dev/null -w "%{http_code}" https://127.0.0.1:6443/healthz
+      register: api_health_check
+      failed_when: api_health_check.stdout != "200"
+      retries: 30
+      delay: 10
+      when: inventory_hostname == "master-node-1"
+
+    - name: Проверка компонентов control plane
+      command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -n kube-system -l tier=control-plane
+      register: control_plane_pods
+      when: inventory_hostname == "master-node-1"
+
+    - name: Отображение статуса control plane
+      debug:
+        var: control_plane_pods.stdout
+      when: inventory_hostname == "master-node-1"
+
+- name: Установка CNI плагина (Flannel)
+  block:
+    - name: Создание конфигурации flannel
+      template:
+        src: flannel.yaml.j2
+        dest: /home/{{ k8s_user }}/flannel.yaml
+        owner: "{{ k8s_user }}"
+        group: "{{ k8s_group }}"
+        mode: 0644
+
+    - name: Применение Flannel
+      command: kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /home/{{ k8s_user }}/flannel.yaml
+      when: inventory_hostname == "master-node-1"
+
+    - name: Ожидание запуска Flannel
+      command: kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=ready pod -l app=flannel -n kube-flannel --timeout=60s
+      when: inventory_hostname == "master-node-1"
+      retries: 30
+      delay: 10
+  when: cni_plugin_value == 'flannel'
+
+- name: Установка CNI плагина cilium
+  block:
+    - name: Распаковка плагина cilium
+      unarchive:
+        src: "{{ playbook_dir }}/files/binares/cilium-linux-amd64.tar.gz"
+        dest: "/usr/bin"
+        remote_src: no
+        owner: root
+        group: root
+        mode: "0755"
+      when: inventory_hostname == "master-node-1"
+
+    - name: Установка плагина cilium
+      shell: cilium install --kubeconfig=/etc/kubernetes/admin.conf
+      when: inventory_hostname == "master-node-1"
+      become: no
+  when: cni_plugin_value == 'cilium'
+
+- name: Присоединение остальных control-plane узлов
+  block:
+    - name: Получение join команды с первого мастера
+      set_fact:
+        control_plane_join_command: "{{ hostvars['master-node-1'].control_plane_join_command | default('') }}"
+      when: inventory_hostname != "master-node-1"
+
+    - name: Проверка наличия join команды
+      fail:
+        msg: "Join command not available for {{ inventory_hostname }}. First master may not have initialized properly."
+      when:
+        - inventory_hostname != "master-node-1"
+        - control_plane_join_command == ""
+
+    - name: Присоединение control-plane узла
+      command: "{{ control_plane_join_command }}"
+      when:
+        - inventory_hostname != "master-node-1"
+        - inventory_hostname in groups['masters']
+        - control_plane_join_command != ""
+      become: yes
+      register: join_result
+
+    - name: Отображение результата присоединения
+      debug:
+        var: join_result.stdout
+      when: join_result is defined
+
+    - name: Проверка успешности присоединения
+      fail:
+        msg: "Failed to join {{ inventory_hostname }} to cluster"
+      when: join_result is defined and join_result.rc != 0
+
+- name: Проверка состояния кластера
+  block:
+    - name: Проверка узлов
+      command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o wide
+      register: nodes_info
+      when: inventory_hostname == "master-node-1"
+
+    - name: Отображение информации об узлах
+      debug:
+        var: nodes_info.stdout
+      when: inventory_hostname == "master-node-1"

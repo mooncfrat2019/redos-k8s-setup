@@ -1,0 +1,261 @@
+---
+- name: Include OS-specific variables
+  include_vars: "{{ item }}"
+  with_first_found:
+    - "{{ ansible_distribution | lower }}-{{ ansible_distribution_major_version | lower }}.yml"
+    - "{{ ansible_distribution | lower }}-{{ ansible_distribution_release | lower }}.yml"
+    - "{{ ansible_distribution | lower }}.yml"
+  ignore_errors: yes
+
+- name: Create etcd user and group
+  user:
+    name: etcd
+    system: yes
+    shell: /sbin/nologin
+    home: "{{ etcd_data_dir }}"
+    create_home: no
+    state: present
+
+- name: Create etcd directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: '0750'
+  loop:
+    - "{{ etcd_data_dir }}"
+    - "{{ etcd_wal_dir }}"
+    - "{{ etcd_cert_dir }}"
+    - /etc/etcd
+    - /var/log/etcd
+
+- name: Copy etcd archive to nodes
+  copy:
+    src: "{{ etcd_archive }}"
+    dest: "/tmp/{{ etcd_archive }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Extract etcd binary from archive
+  unarchive:
+    src: "/tmp/{{ etcd_archive }}"
+    dest: "/tmp"
+    remote_src: yes
+    creates: "/tmp/etcd-v{{ etcd_version }}-linux-amd64/etcd"
+
+- name: Install etcd binaries
+  copy:
+    src: "/tmp/etcd-v{{ etcd_version }}-linux-amd64/{{ item }}"
+    dest: "{{ etcd_install_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: yes
+  loop:
+    - etcd
+    - etcdctl
+  notify:
+    - reload systemd
+
+- name: Cleanup etcd archive and temp files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/{{ etcd_archive }}"
+    - "/tmp/etcd-v{{ etcd_version }}-linux-amd64"
+
+# Создаем папку на узле-генераторе
+- name: Create etcd cert directory on certificate generator node
+  file:
+    path: "{{ etcd_cert_dir }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: '0750'
+  delegate_to: "{{ groups['masters'][0] }}"
+  run_once: true
+  when: etcd_generate_certs
+
+# Генерируем сертификаты
+- name: Generate etcd certificates
+  template:
+    src: etcd-certificates.sh.j2
+    dest: /tmp/generate-etcd-certs.sh
+    mode: '0755'
+  delegate_to: "{{ groups['masters'][0] }}"
+  run_once: true
+  when: etcd_generate_certs
+
+- name: Execute certificate generation
+  command: /tmp/generate-etcd-certs.sh
+  delegate_to: "{{ groups['masters'][0] }}"
+  run_once: true
+  when: etcd_generate_certs
+
+- name: Cleanup temporary script
+  file:
+    path: /tmp/generate-etcd-certs.sh
+    state: absent
+  delegate_to: "{{ groups['masters'][0] }}"
+  run_once: true
+  when: etcd_generate_certs
+
+# Создаем папки на всех узлах
+- name: Create etcd cert directories on all nodes
+  file:
+    path: "{{ etcd_cert_dir }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: '0750'
+  when: etcd_generate_certs
+
+# Распространяем сертификаты на все узлы
+- name: Fetch etcd certificates from master-node-1 to controller
+  fetch:
+    src: "{{ etcd_cert_dir }}/{{ item }}"
+    dest: "/tmp/etcd_certs/{{ item }}"
+    flat: yes
+  loop:
+    - ca.pem
+    - ca-key.pem
+    - master-node-1.pem
+    - master-node-1-key.pem
+    - master-node-2.pem
+    - master-node-2-key.pem
+    - master-node-3.pem
+    - master-node-3-key.pem
+    - kubernetes.pem
+    - kubernetes-key.pem
+    - peer.pem
+    - peer-key.pem
+    - client.pem
+    - client-key.pem
+  delegate_to: "{{ groups['masters'][0] }}"
+  when: etcd_generate_certs
+  run_once: true
+
+# Шаг 2: Распространяем эти сертификаты со своего контроллера на все узлы
+- name: Distribute etcd certificates from controller to all nodes
+  copy:
+    src: "/tmp/etcd_certs/{{ item }}"
+    dest: "{{ etcd_cert_dir }}/{{ item }}"
+    owner: etcd
+    group: etcd
+    mode: '0600'
+  loop:
+    - ca.pem
+    - ca-key.pem
+    - master-node-1.pem
+    - master-node-1-key.pem
+    - master-node-2.pem
+    - master-node-2-key.pem
+    - master-node-3.pem
+    - master-node-3-key.pem
+    - kubernetes.pem
+    - kubernetes-key.pem
+    - peer.pem
+    - peer-key.pem
+    - client.pem
+    - client-key.pem
+  when:
+    - etcd_generate_certs
+    - inventory_hostname != groups['masters'][0]
+
+- name: Create directories for certs
+  file:
+    path: "{{ etcd_k8s_cert_dir }}"
+    state: directory
+    mode: "0755"
+
+# Копируем в Kubernetes PKI
+- name: Copy etcd CA to Kubernetes PKI directory
+  copy:
+    src: "{{ etcd_cert_dir }}/ca.pem"
+    dest: "{{ etcd_k8s_cert_dir }}/etcd-ca.crt"
+    owner: root
+    group: root
+    mode: '0644'
+    remote_src: yes
+  when: etcd_generate_certs
+  become: yes
+
+- name: Copy Kubernetes etcd client certificates
+  copy:
+    src: "{{ etcd_cert_dir }}/{{ item.src }}"
+    dest: "{{ etcd_k8s_cert_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+    remote_src: yes
+  loop:
+    - { src: 'kubernetes.pem', dest: 'apiserver-etcd-client.crt' }
+    - { src: 'kubernetes-key.pem', dest: 'apiserver-etcd-client.key' }
+  when: etcd_generate_certs
+  become: yes
+
+- name: Set etcd node name
+  set_fact:
+    etcd_name: "etcd-{{ inventory_hostname }}"
+
+- name: Set etcd cluster configuration
+  set_fact:
+    # Генерация списка всех участников кластера
+    etcd_initial_cluster: "{% for host in groups['masters'] %}etcd-{{ host }}={{ etcd_peer_protocol }}://{{ hostvars[host]['internal_ip'] }}:{{ etcd_peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+
+    # Настройки для текущей ноды
+    etcd_listen_peer_urls: "{{ etcd_peer_protocol }}://{{ hostvars[inventory_hostname]['internal_ip'] }}:{{ etcd_peer_port }}"
+    etcd_listen_client_urls: "{{ etcd_client_protocol }}://{{ hostvars[inventory_hostname]['internal_ip'] }}:{{ etcd_client_port }},{{ etcd_client_protocol }}://127.0.0.1:{{ etcd_client_port }}"
+    etcd_initial_advertise_peer_urls: "{{ etcd_peer_protocol }}://{{ hostvars[inventory_hostname]['internal_ip'] }}:{{ etcd_peer_port }}"
+    etcd_advertise_client_urls: "{{ etcd_client_protocol }}://{{ hostvars[inventory_hostname]['internal_ip'] }}:{{ etcd_client_port }}"
+
+- name: Configure etcd
+  template:
+    src: etcd.conf.j2
+    dest: /etc/etcd/etcd.conf
+    owner: etcd
+    group: etcd
+    mode: '0640'
+  notify: restart etcd
+
+- name: Install etcd systemd service
+  template:
+    src: etcd.service.j2
+    dest: /etc/systemd/system/etcd.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart etcd
+
+- name: Start etcd service
+  systemd:
+    name: etcd
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+- name: Restart etcd
+  systemd:
+    name: etcd
+    state: restarted
+
+- name: Wait for etcd to be ready
+  wait_for:
+    host: "{{ hostvars[inventory_hostname]['node_ip'] }}"
+    port: "{{ etcd_client_port }}"
+    delay: 5
+    timeout: 30
+  when: etcd_client_protocol == "http"
+
+- name: Verify etcd cluster health
+  command: "{{ etcd_install_dir }}/etcdctl --endpoints={{ etcd_client_protocol }}://{{ hostvars[inventory_hostname]['node_ip'] }}:{{ etcd_client_port }} {{ '--cacert=' + etcd_cert_dir + '/ca.pem --cert=' + etcd_cert_dir + '/client.pem --key=' + etcd_cert_dir + '/client-key.pem' if etcd_client_protocol == 'https' else '' }} endpoint health"
+  register: etcd_health
+  changed_when: false
+  retries: 10
+  delay: 5
+  until: etcd_health.rc == 0

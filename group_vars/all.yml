@@ -1,0 +1,49 @@
+---
+# Transfer configuration
+bundle_path: "{{ playbook_dir }}/files/k8s-offline-bundle.tar.gz"
+cleanup_transfer: true
+
+# User configuration
+k8s_user: "{{ ansible_user }}"
+k8s_group: "{{ k8s_user }}"
+k8s_home: "/home/{{ k8s_user }}"
+
+# Network configuration
+cluster_vip: "{{ hostvars['master-node-1'].node_ip }}"
+cluster_domain: "k8s-ha.local"
+pod_network_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+
+# Registry configuration
+registry_host: "{{ hostvars['registry-server'].node_ip }}"
+registry_port: "5000"
+registry_url: "{{ registry_host }}:{{ registry_port }}"
+
+# Kubernetes configuration
+kubernetes_version: "{{ k8s_version | default('1.33.4') }}"
+kubernetes_version_short: "{{ k8s_version_short | default('1.33') }}"
+container_runtime: "containerd"
+cgroup_driver: "systemd"
+
+crictl_version: "1.33.0"
+
+# Node IPs
+master_ips:
+  master-node-1: "{{ hostvars['master-node-1'].node_ip }}"
+  master-node-2: "{{ hostvars['master-node-2'].node_ip }}"
+  master-node-3: "{{ hostvars['master-node-3'].node_ip }}"
+  registry-server: "{{ hostvars['registry-server'].node_ip }}"
+
+# Package paths
+local_repo_path: "/var/www/html/k8s-repo"
+offline_files_path: "/opt/k8s-offline"
+packages_path: "{{ offline_files_path }}/packages"
+images_path: "{{ offline_files_path }}/images"
+
+# Calico configuration
+calico_version: "3.27.2"
+calico_image_registry: "{{ registry_url }}"
+calico_mode: "vxlan"
+
+# System configuration
+timezone: "Europe/Moscow"

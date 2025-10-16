@@ -1,0 +1,148 @@
+#!/bin/bash
+
+set -e
+
+CERT_DIR="{{ etcd_cert_dir }}"
+DAYS="{{ etcd_cert_days }}"
+CA_DAYS="{{ etcd_ca_days }}"
+
+# Create certificate directory
+mkdir -p $CERT_DIR
+
+# Generate CA certificate
+openssl genrsa -out $CERT_DIR/ca-key.pem 4096
+openssl req -x509 -new -nodes -key $CERT_DIR/ca-key.pem -days $CA_DAYS -out $CERT_DIR/ca.pem -subj "/CN=etcd-ca"
+
+# Generate etcd member certificates for each node
+{% for host in groups['masters'] %}
+echo "Generating certificate for {{ host }}"
+
+# Generate private key
+openssl genrsa -out $CERT_DIR/{{ host }}-key.pem 4096
+
+# Generate CSR config
+cat > $CERT_DIR/{{ host }}-csr.conf << EOF
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = kubernetes
+DNS.2 = kubernetes.default
+DNS.3 = kubernetes.default.svc
+DNS.4 = kubernetes.default.svc.cluster.local
+DNS.5 = localhost
+DNS.6 = master-node-1
+DNS.7 = master-node-2
+DNS.8 = master-node-3
+DNS.9 = etcd-master-node-1
+DNS.10 = etcd-master-node-2
+DNS.11 = etcd-master-node-3
+DNS.12 = k8s-etcd-cluster
+DNS.13 = kubernetes.default.svc.cluster.k8s-ha.local
+IP.1 = 127.0.0.1
+IP.2 = ::1
+IP.3 = {{ host_1 }}
+IP.4 = {{ host_2 }}
+IP.5 = {{ host_3 }}
+{% for master in groups['masters'] %}
+IP.{{ 6 + loop.index0 }} = {{ hostvars[master]['internal_ip'] }}  # ← ВНУТРЕННИЕ IP ВСЕХ узлов
+{% endfor %}
+EOF
+
+# Generate certificate signing request
+openssl req -new -key $CERT_DIR/{{ host }}-key.pem -out $CERT_DIR/{{ host }}.csr -subj "/CN=etcd-{{ host }}" -config $CERT_DIR/{{ host }}-csr.conf
+
+# Sign the certificate
+openssl x509 -req -in $CERT_DIR/{{ host }}.csr \
+    -CA $CERT_DIR/ca.pem \
+    -CAkey $CERT_DIR/ca-key.pem \
+    -CAcreateserial \
+    -out $CERT_DIR/{{ host }}.pem \
+    -days $DAYS \
+    -extensions v3_req \
+    -extfile $CERT_DIR/{{ host }}-csr.conf
+
+# Cleanup CSR config
+rm $CERT_DIR/{{ host }}-csr.conf $CERT_DIR/{{ host }}.csr
+
+{% endfor %}
+
+# Create Kubernetes API server certificate
+echo "Generating certificate for kubernetes API server"
+
+openssl genrsa -out $CERT_DIR/kubernetes-key.pem 4096
+
+cat > $CERT_DIR/kubernetes-csr.conf << EOF
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = kubernetes
+DNS.2 = kubernetes.default
+DNS.3 = kubernetes.default.svc
+DNS.4 = kubernetes.default.svc.cluster.local
+DNS.5 = localhost
+DNS.6 = master-node-1
+DNS.7 = master-node-2
+DNS.8 = master-node-3
+DNS.9 = etcd-master-node-1
+DNS.10 = etcd-master-node-2
+DNS.11 = etcd-master-node-3
+DNS.12 = k8s-etcd-cluster
+DNS.13 = kubernetes.default.svc.cluster.k8s-ha.local
+IP.1 = 127.0.0.1
+IP.2 = ::1
+IP.3 = {{ host_1 }}
+IP.4 = {{ host_2 }}
+IP.5 = {{ host_3 }}
+{% for master in groups['masters'] %}
+IP.{{ 6 + loop.index0 }} = {{ hostvars[master]['internal_ip'] }}  # ← ВНУТРЕННИЕ IP ВСЕХ узлов
+{% endfor %}
+EOF
+
+openssl req -new -key $CERT_DIR/kubernetes-key.pem -out $CERT_DIR/kubernetes.csr -subj "/CN=kube-apiserver" -config $CERT_DIR/kubernetes-csr.conf
+
+openssl x509 -req -in $CERT_DIR/kubernetes.csr \
+    -CA $CERT_DIR/ca.pem \
+    -CAkey $CERT_DIR/ca-key.pem \
+    -CAcreateserial \
+    -out $CERT_DIR/kubernetes.pem \
+    -days $DAYS \
+    -extensions v3_req \
+    -extfile $CERT_DIR/kubernetes-csr.conf
+
+rm $CERT_DIR/kubernetes-csr.conf $CERT_DIR/kubernetes.csr
+
+# Create peer certificate (used for peer communication)
+cp $CERT_DIR/{{ groups['masters'][0] }}-key.pem $CERT_DIR/peer-key.pem
+cp $CERT_DIR/{{ groups['masters'][0] }}.pem $CERT_DIR/peer.pem
+
+# Create client certificate (used for client communication)
+cp $CERT_DIR/{{ groups['masters'][0] }}-key.pem $CERT_DIR/client-key.pem
+cp $CERT_DIR/{{ groups['masters'][0] }}.pem $CERT_DIR/client.pem
+
+# Set proper permissions
+if ls $CERT_DIR/*.pem >/dev/null 2>&1; then
+    chmod 600 $CERT_DIR/*.pem
+fi
+
+if ls $CERT_DIR/*.key >/dev/null 2>&1; then
+    chmod 600 $CERT_DIR/*.key
+fi
+
+chown -R etcd:etcd $CERT_DIR
+
+echo "ETCD certificates generated successfully in $CERT_DIR"
+echo "Kubernetes API server certificates: $CERT_DIR/kubernetes.pem, $CERT_DIR/kubernetes-key.pem"
