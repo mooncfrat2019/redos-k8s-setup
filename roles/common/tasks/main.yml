@@ -82,7 +82,7 @@
     - "{{ k8s_home }}/.kube"
     - "{{ k8s_home }}/.local"
     - /etc/kubernetes
-    - /etc/kuberntes/pki
+    - /etc/kubernetes/pki
     - /etc/kubernetes/manifests
     - /var/lib/kubelet
     - /var/lib/etcd

@@ -23,6 +23,11 @@
       become: yes
   when: inventory_hostname != "registry-server"
 
+- name: Загрузка модуля br_netfilter
+  modprobe:
+    name: br_netfilter
+    state: present
+
 - name: Установка и настройка containerd
   block:
     - name: Обновление пакетов
@@ -417,11 +422,83 @@
       become: yes
       when: inventory_hostname == "master-node-1"
 
+    - name: Создание директории под окружение systemd сервиса kubelet на остальных мастер нодах
+      file:
+        path: "/etc/systemd/system/kubelet.service.d/"
+        state: directory
+        mode: "0755"
+        owner: "root"
+        group: "root"
+      become: yes
+      when: inventory_hostname != "master-node-1"
+
+    - name: Создание systemd сервиса для kubelet на master-node-2/3
+      copy:
+        content: |
+          [Unit]
+          Description=Kubernetes Kubelet Server
+          Documentation=https://kubernetes.io/docs/concepts/overview/components/#kubelet https://kubernetes.io/docs/reference/generated/kubelet/
+          After=containerd.service crio.service
+          
+          [Service]
+          WorkingDirectory=/var/lib/kubelet
+          EnvironmentFile=-/etc/kubernetes/config
+          EnvironmentFile=-/etc/kubernetes/kubelet
+          ExecStart=/usr/bin/kubelet \
+          $KUBE_LOG_LEVEL \
+          $KUBELET_KUBECONFIG \
+          $KUBELET_ADDRESS \
+          $KUBELET_PORT \
+          $KUBELET_HOSTNAME \
+          $KUBELET_ARGS
+          Restart=on-failure
+          KillMode=process
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /lib/systemd/system/kubelet.service
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+      when: inventory_hostname != "master-node-1"
+
+    - name: Создание systemd сервиса (env) для kubelet на master-node-2/3
+      copy:
+        content: |
+          [Service]
+          Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf --fail-swap-on=false"
+          Environment="KUBELET_SYSTEM_PODS_ARGS=--pod-manifest-path=/etc/kubernetes/manifests"
+          Environment="KUBELET_DNS_ARGS=--cluster-dns=10.96.0.10 --cluster-domain=cluster.local"
+          Environment="KUBELET_AUTHZ_ARGS=--authorization-mode=Webhook --client-ca-file=/etc/kubernetes/pki/ca.crt"
+          Environment="KUBELET_EXTRA_ARGS=--cgroup-driver=systemd"
+          
+          # This is a file that "kubeadm init" and "kubeadm join" generates at runtime, populating the KUBELET_KUBEADM_ARGS variable dynamically
+          EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+          
+          ExecStart=
+          ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_SYSTEM_PODS_ARGS $KUBELET_DNS_ARGS $KUBELET_AUTHZ_ARGS $KUBELET_EXTRA_ARGS $KUBELET_KUBEADM_ARGS
+          Restart=always
+          StartLimitInterval=0
+          RestartSec=10
+
+        dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+        owner: root
+        group: root
+        mode: '0644'
+      become: yes
+      when: inventory_hostname != "master-node-1"
+
+    - name: Добавление в автозагрузку kubelet service на node 2 и 3
+      systemd:
+        name: kubelet
+        enabled: yes
+      when: inventory_hostname != "master-node-1"
+
     - name: Перезагрузка демона systemd
       systemd:
         daemon_reload: yes
       become: yes
-      when: inventory_hostname == "master-node-1"
 
     - name: Stop kubelet service
       become: yes
