@@ -172,7 +172,7 @@ spec:
         - /opt/cni/bin/flannel
         command:
         - cp
-        image: {{ registry_url }}/flannel-cni-plugin:v1.8.0
+        image: {{ registry_url }}/flannel-cni-plugin:v1.8.0-flannel1
         name: install-cni-plugin
         volumeMounts:
         - mountPath: /opt/cni/bin
