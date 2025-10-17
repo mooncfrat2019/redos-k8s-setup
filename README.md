@@ -28,3 +28,27 @@
 5) etcd // установка кластера etcd на те же ноды (master-node) с кворумом 3
 6) kubernetes // выполняет установку и настройку кластера k8s
 
+Пример комады запуска:
+```shell
+
+ansible-playbook -i inventory/hosts.yml main.yml -e '{
+  "super_user": "redos",
+  "host_1": "200.200.199.199",
+  "host_2": "200.200.199.200",
+  "host_3": "200.200.199.201",
+  "in_ip_1": "10.0.3.9",
+  "in_ip_2": "10.0.3.8",
+  "in_ip_3": "10.0.3.7",
+  "host_registry": "200.200.199.202",
+  "pod_network_cidr": "10.244.0.0/16",
+  "cni_plugin": "flannel",
+  "skip_bundle_transfer": false,
+  "need_restart": true,
+  "need_k8s_prepare": true
+}' --tags transfer --limit registry-server
+```
+Здесь можно заметить:
+-`cni_plugin` -- определяет какой плагин нужно использовать
+- need_restart -- нужен ли рестарт серверов после выполнения common
+- need_k8s_prepare -- нужны ли подготовительные шаги в роли kubernetes
+- skip_bundle_transfer -- нужно ли пропустить трасфер бандла
